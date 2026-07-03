@@ -32,7 +32,9 @@ jobs:
 
       - name: Package
         shell: pwsh
-        run: Copy-Item -Recurse tcc release/tcc
+        run: |
+          New-Item -ItemType Directory -Force -Path release
+          Copy-Item -Recurse tcc release/tcc
 
       - uses: actions/upload-artifact@v4
         with:
@@ -58,7 +60,9 @@ jobs:
           ./tcc/tcc -v
 
       - name: Package
-        run: cp -r tcc release/tcc
+        run: |
+          mkdir -p release
+          cp -r tcc release/tcc
 
       - uses: actions/upload-artifact@v4
         with:
@@ -84,7 +88,9 @@ jobs:
           ./tcc/tcc -v
 
       - name: Package
-        run: cp -r tcc release/tcc
+        run: |
+          mkdir -p release
+          cp -r tcc release/tcc
 
       - uses: actions/upload-artifact@v4
         with:
@@ -142,7 +148,9 @@ jobs:
           rm -f tcc/libc.dylib
 
       - name: Package
-        run: cp -r tcc release/tcc
+        run: |
+          mkdir -p release
+          cp -r tcc release/tcc
 
       - uses: actions/upload-artifact@v4
         with:
