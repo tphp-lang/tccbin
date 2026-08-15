@@ -52,7 +52,7 @@ jobs:
       - name: Install GCC & deps
         run: |
           sudo apt update
-          sudo apt install -y gcc make libc6-dev git
+          sudo apt install -y gcc make libc6-dev linux-libc-dev git
 
       - name: Build TCC
         run: |
@@ -80,7 +80,7 @@ jobs:
       - name: Install GCC & deps
         run: |
           sudo apt update
-          sudo apt install -y gcc make libc6-dev git
+          sudo apt install -y gcc make libc6-dev linux-libc-dev git
 
       - name: Build TCC
         run: |

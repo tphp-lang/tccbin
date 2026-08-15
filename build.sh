@@ -156,6 +156,30 @@ if [ "$OS" != "Darwin" ]; then
         fi
     fi
 
+    # ── Linux 内核 UAPI 头（linux/limits.h 等，来自 linux-libc-dev 包）──
+    # glibc 的 bits/local_lim.h 会 #include <linux/limits.h>，但该头属于
+    # linux-libc-dev（Debian 与 libc6-dev 分包），上面的 .deb 解压拿不到。
+    # 精简容器（Docker）无系统 linux/ 头时，任何引用 PATH_MAX 等的代码
+    # （mbedtls/openssl 等）编译都会失败，故必须打进 tcc 包
+    echo "[*] 安装 Linux UAPI 头文件 → $TCC_INC"
+    if [ -d /usr/include/linux ]; then
+        cp -rn /usr/include/linux       "$TCC_INC/"
+        cp -rn /usr/include/asm-generic "$TCC_INC/" 2>/dev/null || true
+        # asm/ 在 Debian/Ubuntu 下位于 multiarch 目录（/usr/include/asm 是
+        # 指向它的 symlink）；TCC 的 sysincludepaths 不含 multiarch 路径，
+        # zip 打包还会丢 symlink，因此展平复制到顶层 asm/
+        for asm_src in /usr/include/asm "/usr/include/$MULTIARCH/asm"; do
+            if [ -d "$asm_src" ]; then
+                mkdir -p "$TCC_INC/asm"
+                cp -rnL "$asm_src"/. "$TCC_INC/asm/"
+                break
+            fi
+        done
+        echo "    UAPI: linux/ asm-generic/ asm/"
+    else
+        echo "[WARN] /usr/include/linux 缺失（构建机未装 linux-libc-dev），UAPI 头将不可用"
+    fi
+
     # 复制 CRT + 静态库 + 链接脚本
     echo "[*] 安装 CRT + 链接库 → $TCC_LIB"
     CRT_COUNT=0
@@ -221,6 +245,23 @@ echo 'int main(){return 0;}' > _test_tcc.c
     exit 1
 }
 rm -f _test_tcc.c
+
+# UAPI 头验证：linux/limits.h 是 glibc bits/local_lim.h 的硬依赖（仅 Linux）
+if [ "$OS" != "Darwin" ]; then
+    # 文件断言：防止编译验证被构建机 /usr/include 兜底误判 PASS
+    if [ ! -f tcc/lib/tcc/include/linux/limits.h ]; then
+        echo "UAPI test FAILED: linux/limits.h missing from package"
+        exit 1
+    fi
+    printf '#include <limits.h>\n#include <linux/limits.h>\nint main(){return PATH_MAX>0?0:1;}\n' > _test_uapi.c
+    if (cd tcc && ./tcc -B"$(pwd)/lib/tcc" -o ../_test_uapi ../_test_uapi.c); then
+        echo "UAPI headers (linux/limits.h) OK"
+        rm -f _test_uapi _test_uapi.c
+    else
+        echo "UAPI headers test FAILED: linux/limits.h not found"
+        exit 1
+    fi
+fi
 
 echo "=== 7. 清理 ==="
 rm -rf tcc-src
