@@ -19,6 +19,10 @@ TCC 的目标平台在编译 tcc 自身时由 `TCC_TARGET_*` 宏决定（`-arch`
 | | `x86_64-tcc.exe` | → Linux x86_64 静态 ELF（musl，自带 sysroot） |
 | | `arm64-tcc.exe` | → Linux arm64 静态 ELF（musl，自带 sysroot） |
 | tcc-macos-aarch64 | `tcc` | macOS arm64 native |
+| | `x86_64-win32-tcc` | → 64 位 Windows exe（零外部依赖） |
+| | `i386-win32-tcc` | → 32 位 Windows exe（零外部依赖） |
+| | `x86_64-tcc` | → Linux x86_64 静态 ELF（musl，自带 sysroot） |
+| | `arm64-tcc` | → Linux arm64 静态 ELF（musl，自带 sysroot） |
 
 使用约定：**全部位置无关**——支持文件位置基于二进制/启动器所在目录自动解析，
 解压到任意路径后可从任意工作目录调用。Linux 包自带 glibc 头文件/CRT/静态库，

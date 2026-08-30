@@ -110,6 +110,7 @@ jobs:
 
   # ============================================================
   # macOS aarch64 — clang 编译 TCC (mob 分支)
+  # 产出: native + PE×2（win32）+ musl ELF×2 交叉编译器
   # ============================================================
   macos-aarch64:
     runs-on: macos-latest
@@ -144,6 +145,25 @@ jobs:
             --enable-static
           make
           make install
+          # ── Windows PE 交叉编译器（x86_64-win32 + i386-win32）──
+          # 与 build.sh 第 5 节同机制：最小参数重跑 configure，清掉 config.h
+          # 中无 #ifndef 保护的路径宏，PE 交叉回落 tcc.h 的 PE 默认值
+          # （{B}/include、{B}/lib）；native 已编译完毕不受影响。
+          # config.h 的 CONFIG_TCCDIR 带 #ifndef 保护，config-extra.mak 的
+          # -D 优先生效（DEFINES 为递归变量，recipe 期求值）
+          ./configure --extra-cflags=-O3
+          cat > config-extra.mak <<'XMAKE'
+          DEF-win = -DCONFIG_TCCDIR="\"win32\""
+          CRT-x86_64 = {B}/sysroot/x86_64/lib
+          LIB-x86_64 = {B}/sysroot/x86_64/lib
+          INC-x86_64 = {B}/sysroot/x86_64/include
+          CRT-arm64  = {B}/sysroot/arm64/lib
+          LIB-arm64  = {B}/sysroot/arm64/lib
+          INC-arm64  = {B}/sysroot/arm64/include
+          DEF-x86_64 += -DCONFIG_TCC_SWITCHES=\"-static\"
+          DEF-arm64  += -DCONFIG_TCC_SWITCHES=\"-static\"
+          XMAKE
+          make cross-x86_64-win32 cross-i386-win32 cross-x86_64 cross-arm64
           cd ..
           find tcc -name libtcc1.a -exec cp {} tcc/libtcc1.a \; -quit
           test -f tcc/libtcc1.a || { echo "ERROR: libtcc1.a not found"; exit 1; }
@@ -157,6 +177,73 @@ jobs:
             || { echo "TCC FAIL";./tcc/tcc -v -v 2>&1; exit 1; }
           rm -f _test_tcc.c _test_tcc
           rm -f tcc/libc.dylib
+          # ── PE 交叉支持文件与启动器装入包（与 Linux 包布局一致）──
+          mkdir -p tcc/bin tcc/win32/include tcc/win32/lib
+          cp tinycc-src/x86_64-win32-tcc tinycc-src/i386-win32-tcc tcc/bin/
+          cp -R tinycc-src/win32/include/. tcc/win32/include/
+          cp -f tinycc-src/include/*.h tinycc-src/tcclib.h tcc/win32/include/
+          cp tinycc-src/win32/lib/*.def tcc/win32/lib/
+          cp tinycc-src/x86_64-win32-libtcc1.a tinycc-src/i386-win32-libtcc1.a tcc/win32/lib/
+          for t in x86_64-win32 i386-win32; do
+            cat > "tcc/$t-tcc" <<W
+          #!/bin/sh
+          # tccbin relocatable launcher: PE support files under win32/
+          SELF="\$0"
+          case "\$SELF" in
+              */*) ;;
+              *) SELF="\$(command -v -- "\$SELF" 2>/dev/null || printf '%s' "\$SELF")" ;;
+          esac
+          RES="\$(readlink -f -- "\$SELF" 2>/dev/null || printf '%s' "\$SELF")"
+          DIR=\$(CDPATH= cd -- "\$(dirname -- "\$RES")" && pwd -P)
+          exec "\$DIR/bin/$t-tcc" -B"\$DIR/win32" "\$@"
+          W
+            chmod +x "tcc/$t-tcc"
+          done
+          # ── PE 交叉验证：在 macOS runner 上实际编出 exe 并校验 PE 魔数 ──
+          printf '#include <stdio.h>\nint main(void){printf("hello PE\\n");return 0;}\n' > _test_pe.c
+          (cd /tmp && "$GITHUB_WORKSPACE/tcc/x86_64-win32-tcc" -o /tmp/_t64.exe "$GITHUB_WORKSPACE/_test_pe.c") \
+            && file /tmp/_t64.exe | grep -q "PE32+ executable" \
+            && echo "PE64 cross OK" || { echo "PE64 cross FAIL"; exit 1; }
+          (cd /tmp && "$GITHUB_WORKSPACE/tcc/i386-win32-tcc" -o /tmp/_t32.exe "$GITHUB_WORKSPACE/_test_pe.c") \
+            && file /tmp/_t32.exe | grep -q "PE32 executable" \
+            && echo "PE32 cross OK" || { echo "PE32 cross FAIL"; exit 1; }
+          rm -f _test_pe.c /tmp/_t64.exe /tmp/_t32.exe
+          # ── musl ELF 交叉：sysroot 组装（可移植脚本）+ 启动器 ──
+          # macOS 宿主下 tcc 不做 exe 目录自定位（那是 _WIN32 专属），
+          # 启动器必须显式传 -B<包目录> 使 {B} 锚定的 sysroot 路径生效
+          bash build-sysroot.sh "$GITHUB_WORKSPACE/tinycc-src" "$GITHUB_WORKSPACE/tcc"
+          cp tinycc-src/x86_64-tcc tinycc-src/arm64-tcc tcc/bin/
+          for t in x86_64 arm64; do
+            cat > "tcc/$t-tcc" <<W
+          #!/bin/sh
+          # tccbin relocatable launcher: musl sysroot under sysroot/
+          SELF="\$0"
+          case "\$SELF" in
+              */*) ;;
+              *) SELF="\$(command -v -- "\$SELF" 2>/dev/null || printf '%s' "\$SELF")" ;;
+          esac
+          RES="\$(readlink -f -- "\$SELF" 2>/dev/null || printf '%s' "\$SELF")"
+          DIR=\$(CDPATH= cd -- "\$(dirname -- "\$RES")" && pwd -P)
+          exec "\$DIR/bin/$t-tcc" -B"\$DIR" "\$@"
+          W
+            chmod +x "tcc/$t-tcc"
+          done
+          # ── musl ELF 交叉验证：编出静态 ELF 并校验头与机器类型 ──
+          check_elf() {
+            head="$(od -An -tx1 -N6 "$1" | tr -d ' \n')"
+            em="$(od -An -tx1 -j18 -N2 "$1" | tr -d ' \n')"
+            [ "$head" = "7f454c460201" ] && [ "$em" = "$2" ]
+          }
+          printf '#include <stdio.h>\nint main(void){printf("hello ELF\\n");return 0;}\n' > _test_elf.c
+          (cd /tmp && "$GITHUB_WORKSPACE/tcc/x86_64-tcc" -o /tmp/_tx64 "$GITHUB_WORKSPACE/_test_elf.c") \
+            && check_elf /tmp/_tx64 "3e00" \
+            && [ "$(wc -c < /tmp/_tx64)" -ge 10000 ] \
+            && echo "ELF x86_64 cross OK" || { echo "ELF x86_64 cross FAIL"; exit 1; }
+          (cd /tmp && "$GITHUB_WORKSPACE/tcc/arm64-tcc" -o /tmp/_ta64 "$GITHUB_WORKSPACE/_test_elf.c") \
+            && check_elf /tmp/_ta64 "b700" \
+            && [ "$(wc -c < /tmp/_ta64)" -ge 10000 ] \
+            && echo "ELF arm64 cross OK" || { echo "ELF arm64 cross FAIL"; exit 1; }
+          rm -f _test_elf.c /tmp/_tx64 /tmp/_ta64
           # 位置无关布局：真实二进制入 bin/，包根放启动器（按脚本所在目录传 -B）
           mkdir -p tcc/bin
           mv tcc/tcc tcc/bin/tcc
