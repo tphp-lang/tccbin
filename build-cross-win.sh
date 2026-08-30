@@ -46,10 +46,10 @@ echo "=== C3. config-extra.mak（ELF 交叉的 sysroot 路径与静态默认）=
 # PE 目标（i386-win32）使用 tcc.h 的 PE 默认值 {B}/include、{B}/lib，无需配置。
 cat > config-extra.mak <<'XMAKE'
 CRT-x86_64 = {B}/sysroot/x86_64/lib
-LIB-x86_64 = {B}/sysroot/x86_64
+LIB-x86_64 = {B}/sysroot/x86_64/lib
 INC-x86_64 = {B}/sysroot/x86_64/include
 CRT-arm64  = {B}/sysroot/arm64/lib
-LIB-arm64  = {B}/sysroot/arm64
+LIB-arm64  = {B}/sysroot/arm64/lib
 INC-arm64  = {B}/sysroot/arm64/include
 DEF-x86_64 += -DCONFIG_TCC_SWITCHES=\"-static\"
 DEF-arm64  += -DCONFIG_TCC_SWITCHES=\"-static\"
