@@ -109,6 +109,11 @@ make_sysroot() {  # $1=目标(x86_64/arm64) $2=deb架构(amd64/arm64) $3=multiar
     # （bits/、gnu/、sys/ 等位于 usr/include/<triplet>/ 下）
     cp -r "$STAGE/dev-$DARCH/usr/include/."     "$PKGINC/"
     cp -r "$STAGE/dev-$DARCH/usr/include/$MA/." "$PKGINC/"
+    # tcc 编译器自带头（stddef.h/stdarg.h/float.h/stdatomic.h 等）：
+    # glibc 源码包不含编译器提供的头（stdio.h 依赖 stddef.h），且
+    # stdatomic.h 等必须用 tcc 版本，-f 覆盖 glibc 同名头（同上游
+    # install 规则对 win32/include 的处理）
+    cp -f include/*.h "$PKGINC/"
     # Linux UAPI 头：glibc 的 bits/local_lim.h 硬依赖 <linux/limits.h>
     cp -rL "$STAGE/lld-$DARCH/usr/include/linux"       "$PKGINC/linux"
     cp -rL "$STAGE/lld-$DARCH/usr/include/asm-generic" "$PKGINC/asm-generic"
@@ -125,7 +130,7 @@ make_sysroot() {  # $1=目标(x86_64/arm64) $2=deb架构(amd64/arm64) $3=multiar
     cp "$T-libtcc1.a" "$PKGLIB/"
     # 关键文件断言：防止静默产出残缺 sysroot
     for f in "$PKGINC/bits/libc-header-start.h" "$PKGINC/linux/limits.h" \
-             "$PKGINC/asm/types.h" \
+             "$PKGINC/asm/types.h" "$PKGINC/stddef.h" "$PKGINC/stdarg.h" \
              "$PKGLIB/crt1.o" "$PKGLIB/libc.a" "$PKGLIB/$T-libtcc1.a"; do
         if [ ! -f "$f" ]; then
             echo "[ERROR] sysroot/$T 缺少关键文件: $f"; exit 1
