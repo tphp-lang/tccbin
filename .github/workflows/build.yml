@@ -10,6 +10,8 @@ on:
 jobs:
   # ============================================================
   # Windows x86_64 — MSYS2 MinGW64 编译 TCC (mob 分支)
+  # 产出: native tcc.exe + i386-win32 PE 交叉 +
+  #       x86_64/arm64 Linux ELF 交叉（自带 glibc sysroot）
   # ============================================================
   windows-x86_64:
     runs-on: windows-latest
@@ -24,17 +26,24 @@ jobs:
           install: >-
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-make
+            make
+            curl
+            zstd
             git
 
-      - name: Build TCC
+      - name: Build native TCC
         shell: pwsh
         run: .\build.cmd
+
+      - name: Build cross compilers & sysroot
+        shell: msys2 {0}
+        run: bash build-cross-win.sh
 
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release
-          Copy-Item -Recurse tcc release/tcc
+          Copy-Item -Recurse pkg release/tcc
 
       - uses: actions/upload-artifact@v4
         with:
@@ -43,6 +52,7 @@ jobs:
 
   # ============================================================
   # Linux x86_64 — GCC 编译 TCC (mob 分支)
+  # 产出: native + x86_64-win32 / i386-win32 PE 交叉编译器
   # ============================================================
   linux-x86_64:
     runs-on: ubuntu-latest
@@ -71,6 +81,7 @@ jobs:
 
   # ============================================================
   # Linux aarch64 — GCC 编译 TCC (mob 分支)
+  # 产出: native + x86_64-win32 PE 交叉编译器
   # ============================================================
   linux-aarch64:
     runs-on: ubuntu-24.04-arm

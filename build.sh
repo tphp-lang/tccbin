@@ -227,6 +227,62 @@ if [ "$OS" != "Darwin" ]; then
     echo "[+] glibc 工具链安装完成（Debian ${LIBC_VER} / ${DEB_ARCH}）"
 fi
 
+# ── Windows PE 交叉编译器（x86_64-win32 + i386-win32）──
+# TCC 的目标平台在编译 tcc 自身时由 TCC_TARGET_* 宏决定（-arch 是被忽略的
+# 选项），交叉编译器是独立的二进制。PE 目标的头文件/导入库由 tcc 源码树自带
+# （win32/include、win32/lib），因此 Linux/macOS 上构建 PE 交叉零外部依赖。
+if [ "$OS" != "Darwin" ]; then
+    echo "=== 5. 构建 Windows PE 交叉编译器 ==="
+    # 用最小参数重跑 configure：第一次 configure 传给 native tcc 的
+    # --crtprefix/--libpaths 会无 #ifndef 保护地写进 config.h，导致交叉
+    # PE tcc 沿用 native 的搜索路径。重跑后 config.h 不再包含这两个宏，
+    # 交叉 PE tcc 回落到 tcc.h 的 PE 默认值（{B}/include、{B}/lib）。
+    # 此时 native tcc 已编译完成，不受 config.h 变化影响。
+    ./configure --extra-cflags=-O3
+    # config.h 中 CONFIG_TCCDIR 带 #ifndef 保护，命令行 -D 优先生效：
+    # 覆盖 DEF-win 为相对路径 "win32"，交叉 tcc 与 native 一样遵循
+    # "从包根目录运行" 的约定（DEFINES 是递归变量，此处在 recipe 期生效）
+    cat > config-extra.mak <<'XMAKE'
+DEF-win = -DCONFIG_TCCDIR="\"win32\""
+XMAKE
+    CROSS_TARGETS="cross-x86_64-win32"
+    if [ "$(uname -m)" = "x86_64" ]; then
+        CROSS_TARGETS="$CROSS_TARGETS cross-i386-win32"
+    fi
+    make $CROSS_TARGETS
+    [ -f x86_64-win32-tcc ] || { echo "[ERROR] x86_64-win32-tcc 构建失败"; exit 1; }
+
+    TCC_PKG=../tcc
+    echo "[*] 安装 PE 交叉编译器 → $TCC_PKG"
+    cp -v x86_64-win32-tcc "$TCC_PKG/"
+    if [ -f i386-win32-tcc ]; then cp -v i386-win32-tcc "$TCC_PKG/"; fi
+    # win32 支持文件布局与 make install 的 install-unx 规则一致：
+    # 源码树 win32/include 打底，tcc 自有头文件（stdarg.h 等）覆盖同名文件
+    mkdir -p "$TCC_PKG/win32/include" "$TCC_PKG/win32/lib"
+    cp -r win32/include/. "$TCC_PKG/win32/include/"
+    cp -f include/*.h tcclib.h "$TCC_PKG/win32/include/"
+    # 导入库定义（kernel32.def 等）+ 各目标自举编译的 libtcc1.a
+    cp -v win32/lib/*.def "$TCC_PKG/win32/lib/"
+    cp -v x86_64-win32-libtcc1.a "$TCC_PKG/win32/lib/"
+    if [ -f i386-win32-libtcc1.a ]; then cp -v i386-win32-libtcc1.a "$TCC_PKG/win32/lib/"; fi
+
+    cat > "$TCC_PKG/README.txt" <<'PKGDOC'
+TCC 独立编译器包（Linux/macOS 宿主）
+====================================
+请从本目录内运行（按相对路径解析支持文件）。
+
+  ./tcc hello.c -o hello                    本机程序
+  ./x86_64-win32-tcc hello.c -o hello.exe   产出 64 位 Windows exe
+  ./i386-win32-tcc hello.c -o hello.exe     产出 32 位 Windows exe
+                                            （仅 x86_64 包含此目标）
+
+PE 交叉无需 sysroot：win32/ 内置头文件与导入库（kernel32.def 等）。
+在任意目录使用时可显式指定支持文件位置：
+  /path/to/tcc/x86_64-win32-tcc -B/path/to/tcc/win32 hello.c -o hello.exe
+PKGDOC
+    echo "[+] PE 交叉编译器安装完成"
+fi
+
 if [ "$OS" = "Darwin" ]; then
     # macOS: link libc for Big Sur+
     ln -sf /usr/lib/libSystem.B.dylib ../tcc/lib/tcc/libc.dylib 2>/dev/null || true
@@ -261,6 +317,36 @@ if [ "$OS" != "Darwin" ]; then
         echo "UAPI headers test FAILED: linux/limits.h not found"
         exit 1
     fi
+fi
+
+# PE 交叉验证：用交叉 tcc 编出真实 exe 并校验 PE 头
+# （CI 上无法运行 PE，链接成功 + PE 魔数即为通过标准）
+if [ "$OS" != "Darwin" ]; then
+    verify_pe() {
+        # $1 = exe 文件, $2 = 期望标识（"PE32+ executable" 或 "PE32 executable"）
+        if command -v file >/dev/null 2>&1; then
+            file "$1" | grep -q "$2"
+        else
+            # file 不可用时退化为 MZ 魔数校验
+            [ "$(od -An -c -N2 "$1" | tr -d ' \n')" = "MZ" ]
+        fi
+    }
+    printf '#include <stdio.h>\nint main(void){printf("hello PE\\n");return 0;}\n' > _test_pe.c
+    (cd tcc && ./x86_64-win32-tcc ../_test_pe.c -o ../_test_pe64.exe) \
+        || { echo "PE64 cross test FAILED (x86_64-win32-tcc)"; exit 1; }
+    verify_pe _test_pe64.exe "PE32+ executable" \
+        || { echo "PE64 magic check FAILED"; exit 1; }
+    echo "PE64 cross (x86_64-win32-tcc) OK"
+    rm -f _test_pe64.exe
+    if [ -f tcc/i386-win32-tcc ]; then
+        (cd tcc && ./i386-win32-tcc ../_test_pe.c -o ../_test_pe32.exe) \
+            || { echo "PE32 cross test FAILED (i386-win32-tcc)"; exit 1; }
+        verify_pe _test_pe32.exe "PE32 executable" \
+            || { echo "PE32 magic check FAILED"; exit 1; }
+        echo "PE32 cross (i386-win32-tcc) OK"
+        rm -f _test_pe32.exe
+    fi
+    rm -f _test_pe.c
 fi
 
 echo "=== 7. 清理 ==="
