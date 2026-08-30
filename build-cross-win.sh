@@ -4,7 +4,7 @@
 # 在 build.cmd 完成 native 构建的基础上：
 #   1. configure + make 交叉编译器:
 #        i386-win32        → 32 位 Windows PE
-#        x86_64 / arm64    → Linux ELF（自带 Debian glibc sysroot）
+#        x86_64 / arm64    → Linux ELF（自带 Debian musl 静态 sysroot）
 #   2. 从 Debian 源下载目标架构头文件/CRT/静态库，组装 sysroot/
 #   3. 组装 pkg/ 发布目录（native + 3 个交叉编译器 + 支持文件）
 # 用法: bash build-cross-win.sh（在项目根目录执行；前置 build.cmd）
@@ -61,10 +61,15 @@ for t in i386-win32 x86_64 arm64; do
     [ -f "$t-tcc.exe" ] || { echo "[ERROR] $t-tcc.exe 构建失败"; exit 1; }
 done
 
-echo "=== C5. 下载目标架构 glibc 并组装 sysroot ==="
-# glibc 版本与 build.sh 保持一致；linux-libc-dev 版本随内核滚动，
-# 从 Debian 池目录动态解析最新版（kernel UAPI 头向后兼容，无需对齐 pin）。
-LIBC_VER="2.41-12+deb13u3"
+echo "=== C5. 下载目标架构 musl 并组装 sysroot ==="
+# 为什么是 musl 而不是 glibc（CI 实测结论）：
+#   1) 静态 glibc 依赖 libgcc 的展开器符号（_Unwind_*）与软浮点辅助
+#      （__unordtf2 等），且引用 GNU ld 扩展符号 __ehdr_start——tcc
+#      既不自动链接 libgcc 也不提供该符号，无法自举；
+#   2) musl 静态 libc.a 完全自包含（取消/展开不走 unwinder，auxv 取
+#      程序头），tcc+musl 是 Alpine 长期验证的组合；
+#   3) musl 静态产物体积小、不挑发行版，任何 Linux 内核可直接运行。
+# musl 与 linux-libc-dev 版本均从 Debian 池目录动态解析。
 DEB_BASE="http://ftp.de.debian.org/debian/pool/main"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
@@ -92,45 +97,56 @@ extract_deb() {  # $1 = .deb 文件, $2 = 解压目标目录
     ( cd "$2" && rm -f debian-binary control.tar.* data.tar.* )
 }
 
-echo "[*] 解析 linux-libc-dev 最新版本..."
-if download "$DEB_BASE/l/linux/" "$STAGE/pool.html"; then
-    LLD_VER_AMD64="$(grep -o 'linux-libc-dev_[^"]*_amd64\.deb' "$STAGE/pool.html" | sort -uV | tail -1 | cut -d_ -f2)"
-    LLD_VER_ARM64="$(grep -o 'linux-libc-dev_[^"]*_arm64\.deb'  "$STAGE/pool.html" | sort -uV | tail -1 | cut -d_ -f2)"
+echo "[*] 解析 musl / linux-libc-dev 最新版本..."
+MUSL_VER_AMD64=""; MUSL_VER_ARM64=""; LLD_VER_AMD64=""; LLD_VER_ARM64=""
+if download "$DEB_BASE/m/musl/" "$STAGE/musl-pool.html"; then
+    MUSL_VER_AMD64="$(grep -o 'musl-dev_[^"]*_amd64\.deb' "$STAGE/musl-pool.html" | sort -uV | tail -1 | cut -d_ -f2)"
+    MUSL_VER_ARM64="$(grep -o 'musl-dev_[^"]*_arm64\.deb'  "$STAGE/musl-pool.html" | sort -uV | tail -1 | cut -d_ -f2)"
 else
-    echo "[WARN] Debian 池目录不可达，linux-libc-dev 版本解析失败"
+    echo "[WARN] Debian 池目录（musl）不可达"
+fi
+if download "$DEB_BASE/l/linux/" "$STAGE/lld-pool.html"; then
+    LLD_VER_AMD64="$(grep -o 'linux-libc-dev_[^"]*_amd64\.deb' "$STAGE/lld-pool.html" | sort -uV | tail -1 | cut -d_ -f2)"
+    LLD_VER_ARM64="$(grep -o 'linux-libc-dev_[^"]*_arm64\.deb'  "$STAGE/lld-pool.html" | sort -uV | tail -1 | cut -d_ -f2)"
+else
+    echo "[WARN] Debian 池目录（linux）不可达，UAPI 头将缺失"
 fi
 
-make_sysroot() {  # $1=目标(x86_64/arm64) $2=deb架构(amd64/arm64) $3=multiarch triplet
+make_sysroot() {  # $1=目标(x86_64/arm64) $2=deb架构(amd64/arm64) $3=musl multiarch triplet
     local T="$1" DARCH="$2" MA="$3"
     local PKGINC="../pkg/sysroot/$T/include" PKGLIB="../pkg/sysroot/$T/lib"
-    echo "[*] 组装 sysroot/$T（glibc $LIBC_VER / $DARCH）..."
+    echo "[*] 组装 sysroot/$T（musl $MUSL_VER / $DARCH）..."
     mkdir -p "$PKGINC" "$PKGLIB"
-    # glibc 头文件：顶层通用头 + multiarch 目录内容展平
-    # （bits/、gnu/、sys/ 等位于 usr/include/<triplet>/ 下）
-    cp -r "$STAGE/dev-$DARCH/usr/include/."     "$PKGINC/"
-    cp -r "$STAGE/dev-$DARCH/usr/include/$MA/." "$PKGINC/"
+    # musl 头文件：Debian 打包在 /usr/include/<musl-triplet>/ 下，整体展平
+    if [ -d "$STAGE/musl-$DARCH/usr/include/$MA" ]; then
+        cp -r "$STAGE/musl-$DARCH/usr/include/$MA/." "$PKGINC/"
+    elif [ -d "$STAGE/musl-$DARCH/usr/include/bits" ]; then
+        cp -r "$STAGE/musl-$DARCH/usr/include/." "$PKGINC/"
+    else
+        echo "[ERROR] musl-dev ($DARCH) 中未找到头文件目录"; exit 1
+    fi
     # tcc 编译器自带头（stddef.h/stdarg.h/float.h/stdatomic.h 等）：
-    # glibc 源码包不含编译器提供的头（stdio.h 依赖 stddef.h），且
-    # stdatomic.h 等必须用 tcc 版本，-f 覆盖 glibc 同名头（同上游
-    # install 规则对 win32/include 的处理）
+    # musl 与 glibc 一样不含编译器提供的头，-f 覆盖 musl 同名头
+    # （stdatomic.h 必须用 tcc 版本）
     cp -f include/*.h "$PKGINC/"
-    # Linux UAPI 头：glibc 的 bits/local_lim.h 硬依赖 <linux/limits.h>
+    # Linux UAPI 头（用户代码引用 <linux/...>、<asm/...> 时需要）
     cp -rL "$STAGE/lld-$DARCH/usr/include/linux"       "$PKGINC/linux"
     cp -rL "$STAGE/lld-$DARCH/usr/include/asm-generic" "$PKGINC/asm-generic"
     if [ -d "$STAGE/lld-$DARCH/usr/include/$MA/asm" ]; then
         cp -rL "$STAGE/lld-$DARCH/usr/include/$MA/asm" "$PKGINC/asm"
     fi
-    # CRT + 静态库（Linux 目标链接需要 crt1/crti/crtn；crtbegin* 仅 BSD/Android）
-    for f in crt1.o crti.o crtn.o Mcrt1.o libc.a libm.a libpthread.a libdl.a librt.a; do
-        if [ -f "$STAGE/dev-$DARCH/usr/lib/$MA/$f" ]; then
-            cp "$STAGE/dev-$DARCH/usr/lib/$MA/$f" "$PKGLIB/"
+    # CRT + 静态库（musl：crt1/crti/crtn + libc.a；math 已并入 libc，
+    # libm.a 为兼容占位；libpthread/libdl 已并入 libc 无需单独提供）
+    for f in crt1.o crti.o crtn.o libc.a libm.a; do
+        if [ -f "$STAGE/musl-$DARCH/usr/lib/$MA/$f" ]; then
+            cp "$STAGE/musl-$DARCH/usr/lib/$MA/$f" "$PKGLIB/"
         fi
     done
     # 交叉 tcc 自举编译的运行时支持库（make cross-<T> 产物）
     cp "$T-libtcc1.a" "$PKGLIB/"
     # 关键文件断言：防止静默产出残缺 sysroot
-    for f in "$PKGINC/bits/libc-header-start.h" "$PKGINC/linux/limits.h" \
-             "$PKGINC/asm/types.h" "$PKGINC/stddef.h" "$PKGINC/stdarg.h" \
+    for f in "$PKGINC/stdio.h" "$PKGINC/bits/alltypes.h" "$PKGINC/stddef.h" \
+             "$PKGINC/linux/limits.h" \
              "$PKGLIB/crt1.o" "$PKGLIB/libc.a" "$PKGLIB/$T-libtcc1.a"; do
         if [ ! -f "$f" ]; then
             echo "[ERROR] sysroot/$T 缺少关键文件: $f"; exit 1
@@ -139,13 +155,17 @@ make_sysroot() {  # $1=目标(x86_64/arm64) $2=deb架构(amd64/arm64) $3=multiar
     echo "    头文件 $(find "$PKGINC" -type f | wc -l) 个, 支持库 $(ls "$PKGLIB" | wc -l) 个"
 }
 
-for spec in "x86_64 amd64 x86_64-linux-gnu" "arm64 arm64 aarch64-linux-gnu"; do
+for spec in "x86_64 amd64 x86_64-linux-musl" "arm64 arm64 aarch64-linux-musl"; do
     set -- $spec
     T="$1"; DARCH="$2"; MA="$3"
 
-    echo "[*] 下载 libc6-dev ($DARCH)..."
-    download "$DEB_BASE/g/glibc/libc6-dev_${LIBC_VER}_${DARCH}.deb" "$STAGE/libc6-dev-$DARCH.deb"
-    extract_deb "$STAGE/libc6-dev-$DARCH.deb" "$STAGE/dev-$DARCH"
+    eval "MUSL_VER=\$MUSL_VER_${DARCH^^}"
+    if [ -z "$MUSL_VER" ]; then
+        echo "[ERROR] musl-dev ($DARCH) 版本解析失败"; exit 1
+    fi
+    echo "[*] 下载 musl-dev $MUSL_VER ($DARCH)..."
+    download "$DEB_BASE/m/musl/musl-dev_${MUSL_VER}_${DARCH}.deb" "$STAGE/musl-dev-$DARCH.deb"
+    extract_deb "$STAGE/musl-dev-$DARCH.deb" "$STAGE/musl-$DARCH"
 
     eval "LLD_VER=\$LLD_VER_${DARCH^^}"
     if [ -z "$LLD_VER" ]; then
@@ -187,9 +207,10 @@ native / PE 交叉:
 交叉编译 Linux ELF（产物拷到对应架构的 Linux 上直接运行）:
   x86_64-tcc.exe hello.c -o hello            Linux x86_64
   arm64-tcc.exe  hello.c -o hello            Linux arm64
-  sysroot/<架构>/ 内置目标架构 glibc 头文件与静态库（Debian 13, glibc 2.41）。
-  静态链接已是内置默认（-static 已烘进编译器），无需传参；
+  sysroot/<架构>/ 内置 musl 头文件与静态库（Debian musl 1.2.x）+ UAPI 头。
+  静态链接已是内置默认（-static 烘进编译器），无需传参；
   动态链接与 -shared 暂不支持。
+  产物为全静态 ELF，不依赖目标机 libc，任何 Linux 发行版均可直接运行。
 
 Windows PE 专属选项示例:
   tcc.exe gui.c -o gui.exe -luser32 -lgdi32 -Wl,-subsystem=windows
@@ -217,16 +238,15 @@ check_elf() {  # $1=文件 $2=期望 e_machine 小端字节（"3e00"=x86_64, "b7
 }
 ./x86_64-tcc _t.c -o _tx64 || { echo "[ERROR] x86_64-tcc 测试失败"; exit 1; }
 if ! check_elf _tx64 "3e00"; then echo "[ERROR] _tx64 不是 x86_64 ELF"; exit 1; fi
-# 体积下限：证明默认链接确实拉入了静态 glibc（若 CONFIG_TCC_SWITCHES 烘焙
-# 失效，此处走动态链接会先因找不到 libc.so 报错，双重保险）
-if [ "$(wc -c < _tx64)" -lt 500000 ]; then
-    echo "[ERROR] _tx64 体积异常，默认静态链接可能未生效"; exit 1
+# 体积下限：musl 静态 hello 约几十 KB；链接失败或产物异常时远小于此
+if [ "$(wc -c < _tx64)" -lt 10000 ]; then
+    echo "[ERROR] _tx64 体积异常，静态链接可能未生效"; exit 1
 fi
 echo "ELF x86_64 cross (x86_64-tcc.exe) OK: $(wc -c < _tx64) bytes"
 ./arm64-tcc _t.c -o _ta64 || { echo "[ERROR] arm64-tcc 测试失败"; exit 1; }
 if ! check_elf _ta64 "b700"; then echo "[ERROR] _ta64 不是 aarch64 ELF"; exit 1; fi
-if [ "$(wc -c < _ta64)" -lt 500000 ]; then
-    echo "[ERROR] _ta64 体积异常，默认静态链接可能未生效"; exit 1
+if [ "$(wc -c < _ta64)" -lt 10000 ]; then
+    echo "[ERROR] _ta64 体积异常，静态链接可能未生效"; exit 1
 fi
 echo "ELF arm64 cross (arm64-tcc.exe) OK: $(wc -c < _ta64) bytes"
 rm -f _t.c _t32.exe _tx64 _ta64
