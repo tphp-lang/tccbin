@@ -8,6 +8,26 @@ set -o pipefail
 
 OS="$(uname -s)"
 
+# 位置无关启动器：真实二进制在 bin/ 内，启动器按自身所在目录传 -B。
+# {B} 路径模板在 tcc 参数解析之后才展开（tcc.c: tcc_parse_args 先于
+# tcc_set_output_type，crt/lib/include 模板均经 tcc_split_path 的 {B} 替换），
+# 因此 -B<包目录> 能让全部支持文件定位与工作目录解耦。
+write_wrapper() {  # $1=包目录 $2=启动器文件名 $3=bin/内二进制名 $4=-B 附加子路径
+    cat > "$1/$2" <<WRAPPER
+#!/bin/sh
+# tccbin relocatable launcher: support files resolve from this dir ({B})
+SELF="\$0"
+case "\$SELF" in
+    */*) ;;
+    *) SELF="\$(command -v -- "\$SELF" 2>/dev/null || printf '%s' "\$SELF")" ;;
+esac
+RES="\$(readlink -f -- "\$SELF" 2>/dev/null || printf '%s' "\$SELF")"
+DIR=\$(CDPATH= cd -- "\$(dirname -- "\$RES")" && pwd -P)
+exec "\$DIR/$3" -B"\$DIR$4" "\$@"
+WRAPPER
+    chmod 755 "$1/$2"
+}
+
 echo "=== 1. 克隆 TCC 源码 ==="
 # 记下项目根目录绝对路径 — TCC 的 --prefix 必须用绝对路径
 # 否则 TCC 初始化时从 CWD 解析相对路径，会找错 libtcc1.a 的位置
@@ -31,12 +51,14 @@ echo "=== 2. 配置 TCC ==="
 echo "       prefix = $PROJECT_ROOT/tcc"
 if [ "$OS" = "Darwin" ]; then
     SDK=$(xcrun --show-sdk-path)
+    # {B} = tcc_lib_path（启动器传 -B<包目录>），全部搜索路径锚定 {B}，
+    # 解压到任意路径均可使用；{B}/include 为包内自带头文件
     ./configure \
         --prefix="$PROJECT_ROOT/tcc" \
         --bindir="$PROJECT_ROOT/tcc" \
-        --crtprefix="../tcc/lib/tcc:$SDK/usr/lib" \
-        --libpaths="../tcc/lib/tcc:$SDK/usr/lib:/usr/lib:/usr/local/lib" \
-        --sysincludepaths="../tcc/lib/tcc/include:$SDK/usr/include:/usr/local/include" \
+        --crtprefix="{B}/lib/tcc:$SDK/usr/lib" \
+        --libpaths="{B}:{B}/lib/tcc:$SDK/usr/lib:/usr/lib:/usr/local/lib" \
+        --sysincludepaths="{B}/include:{B}/lib/tcc/include:$SDK/usr/include:/usr/local/include" \
         --extra-cflags="-I$SDK/usr/include -O3" \
         --cc=cc \
         --config-new_macho=yes \
@@ -49,8 +71,9 @@ else
     ./configure \
         --prefix="$PROJECT_ROOT/tcc" \
         --bindir="$PROJECT_ROOT/tcc" \
-        --crtprefix="lib/tcc:/usr/lib/$ARCH:/usr/lib64:/usr/lib:/lib/$ARCH:/lib" \
-        --libpaths="lib/tcc:/usr/lib/$ARCH:/usr/lib64:/usr/lib:/lib/$ARCH:/lib:/usr/local/lib/$ARCH:/usr/local/lib" \
+        --crtprefix="{B}/lib/tcc:/usr/lib/$ARCH:/usr/lib64:/usr/lib:/lib/$ARCH:/lib" \
+        --libpaths="{B}:{B}/lib/tcc:/usr/lib/$ARCH:/usr/lib64:/usr/lib:/lib/$ARCH:/lib:/usr/local/lib/$ARCH:/usr/local/lib" \
+        --sysincludepaths="{B}/include:{B}/lib/tcc/include:/usr/local/include:/usr/include:/usr/include/$ARCH" \
         --extra-cflags=-O3 \
         --config-bcheck=yes \
         --config-backtrace=yes
@@ -254,8 +277,17 @@ XMAKE
 
     TCC_PKG=../tcc
     echo "[*] 安装 PE 交叉编译器 → $TCC_PKG"
-    cp -v x86_64-win32-tcc "$TCC_PKG/"
-    if [ -f i386-win32-tcc ]; then cp -v i386-win32-tcc "$TCC_PKG/"; fi
+    mkdir -p "$TCC_PKG/bin"
+    # native 二进制移入 bin/，包根改放位置无关启动器（含 PE 交叉）；
+    # PE 交叉的 -B 指向 win32/（{B}/include、{B}/lib 即 win32 下的支持文件）
+    mv "$TCC_PKG/tcc" "$TCC_PKG/bin/tcc"
+    cp -v x86_64-win32-tcc "$TCC_PKG/bin/"
+    write_wrapper "$TCC_PKG" tcc bin/tcc ""
+    write_wrapper "$TCC_PKG" x86_64-win32-tcc bin/x86_64-win32-tcc /win32
+    if [ -f i386-win32-tcc ]; then
+        cp -v i386-win32-tcc "$TCC_PKG/bin/"
+        write_wrapper "$TCC_PKG" i386-win32-tcc bin/i386-win32-tcc /win32
+    fi
     # win32 支持文件布局与 make install 的 install-unx 规则一致：
     # 源码树 win32/include 打底，tcc 自有头文件（stdarg.h 等）覆盖同名文件
     mkdir -p "$TCC_PKG/win32/include" "$TCC_PKG/win32/lib"
@@ -269,18 +301,31 @@ XMAKE
     cat > "$TCC_PKG/README.txt" <<'PKGDOC'
 TCC 独立编译器包（Linux/macOS 宿主）
 ====================================
-请从本目录内运行（按相对路径解析支持文件）。
+位置无关：包根的 tcc / x86_64-win32-tcc / i386-win32-tcc 是启动脚本，
+按脚本所在目录定位支持文件，可从任意工作目录调用（真实二进制在 bin/，
+一般无需直接调用）。
 
   ./tcc hello.c -o hello                    本机程序
   ./x86_64-win32-tcc hello.c -o hello.exe   产出 64 位 Windows exe
   ./i386-win32-tcc hello.c -o hello.exe     产出 32 位 Windows exe
                                             （仅 x86_64 包含此目标）
 
+包内自带 glibc 头文件/CRT/静态库（lib/tcc/include、lib/tcc/*.a）与
+Linux UAPI 头，容器或精简系统里无需安装 libc6-dev 即可编译。
 PE 交叉无需 sysroot：win32/ 内置头文件与导入库（kernel32.def 等）。
-在任意目录使用时可显式指定支持文件位置：
-  /path/to/tcc/x86_64-win32-tcc -B/path/to/tcc/win32 hello.c -o hello.exe
+
+注意：启动器按"脚本所在目录"解析路径；如需通过符号链接调用，
+请链接整个包目录，或直接调用 bin/ 内二进制并自行传 -B<包目录>。
 PKGDOC
     echo "[+] PE 交叉编译器安装完成"
+fi
+
+if [ "$OS" = "Darwin" ]; then
+    # macOS 包同样改为位置无关布局（native 单二进制）
+    TCC_PKG=../tcc
+    mkdir -p "$TCC_PKG/bin"
+    mv "$TCC_PKG/tcc" "$TCC_PKG/bin/tcc"
+    write_wrapper "$TCC_PKG" tcc bin/tcc ""
 fi
 
 if [ "$OS" = "Darwin" ]; then
@@ -289,13 +334,14 @@ if [ "$OS" = "Darwin" ]; then
 fi
 
 echo "=== 6. 验证 ==="
-cd ..
+PKG="$PROJECT_ROOT/tcc"
+cd "$PROJECT_ROOT"
 echo 'int main(){return 0;}' > _test_tcc.c
-# TCC 的 crtprefix/libpaths 用相对路径 lib/tcc，从 CWD 解析
-# chdir 到 tcc/ 后: lib/tcc → tcc/lib/tcc/ → libtcc1.a + CRT 文件都在这里
-(cd tcc && ./tcc -B"$(pwd)/lib/tcc" -o ../_test_tcc ../_test_tcc.c) && {
-    echo "TCC standalone OK"
-    rm -f _test_tcc
+# 位置无关验证：在包目录之外调用启动器（模拟用户解压到任意路径后使用），
+# CRT/头文件/库全部应来自包内自带的 lib/tcc 与 include
+(cd /tmp && "$PKG/tcc" -o /tmp/_test_tcc "$PROJECT_ROOT/_test_tcc.c") && {
+    echo "TCC standalone OK (relocatable)"
+    rm -f /tmp/_test_tcc
 } || {
     echo "TCC FAILED"
     exit 1
@@ -310,9 +356,9 @@ if [ "$OS" != "Darwin" ]; then
         exit 1
     fi
     printf '#include <limits.h>\n#include <linux/limits.h>\nint main(){return PATH_MAX>0?0:1;}\n' > _test_uapi.c
-    if (cd tcc && ./tcc -B"$(pwd)/lib/tcc" -o ../_test_uapi ../_test_uapi.c); then
+    if (cd /tmp && "$PKG/tcc" -o /tmp/_test_uapi "$PROJECT_ROOT/_test_uapi.c"); then
         echo "UAPI headers (linux/limits.h) OK"
-        rm -f _test_uapi _test_uapi.c
+        rm -f /tmp/_test_uapi _test_uapi.c
     else
         echo "UAPI headers test FAILED: linux/limits.h not found"
         exit 1
@@ -332,19 +378,19 @@ if [ "$OS" != "Darwin" ]; then
         fi
     }
     printf '#include <stdio.h>\nint main(void){printf("hello PE\\n");return 0;}\n' > _test_pe.c
-    (cd tcc && ./x86_64-win32-tcc ../_test_pe.c -o ../_test_pe64.exe) \
+    (cd /tmp && "$PKG/x86_64-win32-tcc" -o /tmp/_test_pe64.exe "$PROJECT_ROOT/_test_pe.c") \
         || { echo "PE64 cross test FAILED (x86_64-win32-tcc)"; exit 1; }
-    verify_pe _test_pe64.exe "PE32+ executable" \
+    verify_pe /tmp/_test_pe64.exe "PE32+ executable" \
         || { echo "PE64 magic check FAILED"; exit 1; }
     echo "PE64 cross (x86_64-win32-tcc) OK"
-    rm -f _test_pe64.exe
-    if [ -f tcc/i386-win32-tcc ]; then
-        (cd tcc && ./i386-win32-tcc ../_test_pe.c -o ../_test_pe32.exe) \
+    rm -f /tmp/_test_pe64.exe
+    if [ -f "$PKG/bin/i386-win32-tcc" ]; then
+        (cd /tmp && "$PKG/i386-win32-tcc" -o /tmp/_test_pe32.exe "$PROJECT_ROOT/_test_pe.c") \
             || { echo "PE32 cross test FAILED (i386-win32-tcc)"; exit 1; }
-        verify_pe _test_pe32.exe "PE32 executable" \
+        verify_pe /tmp/_test_pe32.exe "PE32 executable" \
             || { echo "PE32 magic check FAILED"; exit 1; }
         echo "PE32 cross (i386-win32-tcc) OK"
-        rm -f _test_pe32.exe
+        rm -f /tmp/_test_pe32.exe
     fi
     rm -f _test_pe.c
 fi
@@ -354,4 +400,4 @@ rm -rf tcc-src
 
 echo ""
 echo "✓ 独立 TCC 构建完成"
-echo "  二进制: $PWD/tcc/tcc"
+echo "  启动器: $PWD/tcc/tcc（位置无关，真实二进制在 tcc/bin/）"

@@ -132,9 +132,9 @@ jobs:
           ./configure \
             --prefix=../tcc \
             --bindir=../tcc \
-            --crtprefix="../tcc:/usr/lib" \
-            --libpaths="../tcc:/usr/local/lib:/usr/lib:/lib" \
-            --sysincludepaths="../tcc/include:/usr/local/include:$SDK/usr/include" \
+            --crtprefix="{B}/lib/tcc:/usr/lib" \
+            --libpaths="{B}:{B}/lib/tcc:/usr/local/lib:/usr/lib:/lib" \
+            --sysincludepaths="{B}/include:{B}/lib/tcc/include:/usr/local/include:$SDK/usr/include" \
             --extra-cflags="-I$SDK/usr/include -O3" \
             --cc=cc \
             --config-new_macho=yes \
@@ -157,6 +157,27 @@ jobs:
             || { echo "TCC FAIL";./tcc/tcc -v -v 2>&1; exit 1; }
           rm -f _test_tcc.c _test_tcc
           rm -f tcc/libc.dylib
+          # 位置无关布局：真实二进制入 bin/，包根放启动器（按脚本所在目录传 -B）
+          mkdir -p tcc/bin
+          mv tcc/tcc tcc/bin/tcc
+          cat > tcc/tcc <<'W'
+          #!/bin/sh
+          # tccbin relocatable launcher: support files resolve from this dir ({B})
+          SELF="$0"
+          case "$SELF" in
+              */*) ;;
+              *) SELF="$(command -v -- "$SELF" 2>/dev/null || printf '%s' "$SELF")" ;;
+          esac
+          RES="$(readlink -f -- "$SELF" 2>/dev/null || printf '%s' "$SELF")"
+          DIR=$(CDPATH= cd -- "$(dirname -- "$RES")" && pwd -P)
+          exec "$DIR/bin/tcc" -B"$DIR" "$@"
+          W
+          chmod +x tcc/tcc
+          # 位置无关验证：从包目录之外调用
+          echo 'int main(){return 0;}' > _test_tcc.c
+          (cd /tmp && "$GITHUB_WORKSPACE/tcc/tcc" -o /tmp/_test_tcc "$GITHUB_WORKSPACE/_test_tcc.c") \
+            && echo "TCC relocatable OK" || { echo "TCC FAIL"; exit 1; }
+          rm -f _test_tcc.c /tmp/_test_tcc
 
       - name: Package
         run: |

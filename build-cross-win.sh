@@ -84,11 +84,12 @@ extract_deb() {  # $1 = .deb 文件, $2 = 解压目标目录
     local deb; deb="$(realpath "$1")"
     mkdir -p "$2"
     (
-        cd "$2" \
-        && ar x "$deb" \
-        && if [ -f data.tar.zst ]; then tar --zstd -xf data.tar.zst; else tar -xf data.tar.*; fi \
-        && rm -f debian-binary control.tar.* data.tar.*
-    )
+        cd "$2" && ar x "$deb" \
+        && if [ -f data.tar.zst ]; then tar --zstd -xf data.tar.zst; else tar -xf data.tar.*; fi
+    ) || echo "[WARN] data.tar 解压有报错，见上方日志（Windows 下 tar 无法为指向包外" \
+             "文件的 .so 符号链接建链——深层复制语义要求目标在树内。这些链接仅服务" \
+             "动态开发，静态 sysroot 不需要；关键文件由 make_sysroot 断言把关）"
+    ( cd "$2" && rm -f debian-binary control.tar.* data.tar.* )
 }
 
 echo "[*] 解析 linux-libc-dev 最新版本..."
@@ -124,6 +125,7 @@ make_sysroot() {  # $1=目标(x86_64/arm64) $2=deb架构(amd64/arm64) $3=multiar
     cp "$T-libtcc1.a" "$PKGLIB/"
     # 关键文件断言：防止静默产出残缺 sysroot
     for f in "$PKGINC/bits/libc-header-start.h" "$PKGINC/linux/limits.h" \
+             "$PKGINC/asm/types.h" \
              "$PKGLIB/crt1.o" "$PKGLIB/libc.a" "$PKGLIB/$T-libtcc1.a"; do
         if [ ! -f "$f" ]; then
             echo "[ERROR] sysroot/$T 缺少关键文件: $f"; exit 1
