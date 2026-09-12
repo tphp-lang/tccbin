@@ -293,6 +293,30 @@ XMAKE
     mkdir -p "$TCC_PKG/win32/include" "$TCC_PKG/win32/lib"
     cp -r win32/include/. "$TCC_PKG/win32/include/"
     cp -f include/*.h tcclib.h "$TCC_PKG/win32/include/"
+    # ── PE 导入库补丁：kernel32.def（仅 Linux/macOS 交叉路径）──
+    # mob 自带 win32/lib/kernel32.def 是 XP 时代导出表（776 项），缺后续 API：
+    # tcc 链接时优先用 lib/*.def 而非真实 DLL。Windows 宿主下 build.cmd /
+    # build-cross-win.sh 会在构建时用真实 kernel32.dll 重生成完整导出表；本脚本运行于
+    # Linux/macOS，无法读取 Windows DLL，故退化为"按需追加缺失的现代 kernel32 API"
+    # （幂等）。完整覆盖请在 Windows 宿主执行 build.cmd，将生成的 win32/lib/kernel32.def
+    # 提交进仓库复用（交叉 PE 目标直接拷贝该 def）。
+    KERNEL32_DEF="win32/lib/kernel32.def"
+    if [ -f "$KERNEL32_DEF" ]; then
+        for sym in \
+            IsWow64Process IsWow64Process64 \
+            Wow64DisableWow64FsRedirection Wow64RevertWow64FsRedirection \
+            GetModuleHandleExA GetModuleHandleExW \
+            GetNativeSystemInfo GetLogicalProcessorInformation GetProcessId GetThreadId \
+            GetCurrentProcessorNumber InitializeCriticalSectionEx \
+            CreateMutexExA CreateMutexExW CreateEventExA CreateEventExW \
+            CreateSemaphoreExA CreateSemaphoreExW CreateFile2 GetTickCount64 \
+            GetFinalPathNameByHandleA GetFinalPathNameByHandleW \
+            SetFileInformationByHandle GetFileInformationByHandleEx \
+            QueryFullProcessImageNameA QueryFullProcessImageNameW ; do
+            grep -qxi "$sym" "$KERNEL32_DEF" 2>/dev/null || printf '%s\n' "$sym" >> "$KERNEL32_DEF"
+        done
+        echo "    [FIX] kernel32.def 已补充缺失的现代 API（按需，幂等）"
+    fi
     # 导入库定义（kernel32.def 等）+ 各目标自举编译的 libtcc1.a
     cp -v win32/lib/*.def "$TCC_PKG/win32/lib/"
     cp -v x86_64-win32-libtcc1.a "$TCC_PKG/win32/lib/"

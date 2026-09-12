@@ -181,6 +181,22 @@ done
 echo "=== C6. 组装 pkg/ 发布目录 ==="
 # 注意：sysroot/ 已在上一步写入 ../pkg，此处只补齐其余文件，不可再清空
 # native（build-tcc.bat 产物）：{B}=exe 所在目录 → include/、lib/ 置于包根
+# [补丁] mob 自带 win32/lib/kernel32.def 是 XP 时代导出表（776 项），缺后续 API：
+# 直接调用 IsWow64Process（XP SP2/Vista 加入）等新 API 的程序链接时报
+# "tcc: error: unresolved reference"——tcc 链接时优先用 lib/*.def 而非真实 DLL。
+# 优先用刚构建的 native tcc.exe 从真实 System32\kernel32.dll 重新生成完整导出表
+# （覆盖式，最稳健，覆盖所有后续 API）；impdef 不可用则退化为按需追加缺失符号。
+REGEN_DEF=0
+if [ -f win32/tcc.exe ] && [ -f "$WINDIR/System32/kernel32.dll" ]; then
+    if ./win32/tcc.exe -impdef "$WINDIR/System32/kernel32.dll" -o win32/lib/kernel32.def 2>/dev/null; then
+        echo "    [FIX] kernel32.def 由真实 kernel32.dll 重新生成（完整导出表）"
+        REGEN_DEF=1
+    fi
+fi
+if [ "$REGEN_DEF" -ne 1 ]; then
+    grep -qxi "IsWow64Process" win32/lib/kernel32.def 2>/dev/null || printf 'IsWow64Process\n' >> win32/lib/kernel32.def
+    echo "    [FIX] kernel32.def 追加 IsWow64Process（impdef 不可用，降级处理）"
+fi
 cp win32/tcc.exe ../pkg/
 if [ -f win32/libtcc.dll ]; then cp win32/libtcc.dll ../pkg/; fi
 cp -r win32/include/. ../pkg/include/
