@@ -85,6 +85,25 @@ download() {
     fi
 }
 
+# ── 从池页面的 deb 文件名列表里取最新版本号 ──
+# sort -V 是 GNU coreutils 扩展；macOS/BSD sort 不支持（报
+# "illegal option -- V"，配合 set -o pipefail 会直接终止构建）。
+# 探测能力后分流：GNU 路径行为不变；BSD 路径退化为 POSIX 选项
+# 按版本号的数值分段排序（Debian 版本形如 1.2.6-2 / 6.1.176-1，
+# 按 . 分段数值比较，后缀 revision 由字典序兜底）。
+# 局限：回退路径不实现完整 Debian 版本比较规则（~ 预发布、epoch、
+# 字母后缀），遇到这类 exotic 版本可能与 GNU 路径取到不同结果。
+# 注意：build-sysroot.sh 中有同名同源函数，改动需两边同步。
+latest_ver() {  # stdin: deb 文件名列表 → stdout: 最新版本号
+    local vers
+    vers="$(cut -d_ -f2 | sort -u)"
+    if sort -V </dev/null >/dev/null 2>&1; then
+        printf '%s\n' "$vers" | sort -V | tail -1
+    else
+        printf '%s\n' "$vers" | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -k5,5n | tail -1
+    fi
+}
+
 extract_deb() {  # $1 = .deb 文件, $2 = 解压目标目录
     local deb; deb="$(realpath "$1")"
     mkdir -p "$2"
@@ -100,14 +119,14 @@ extract_deb() {  # $1 = .deb 文件, $2 = 解压目标目录
 echo "[*] 解析 musl / linux-libc-dev 最新版本..."
 MUSL_VER_AMD64=""; MUSL_VER_ARM64=""; LLD_VER_AMD64=""; LLD_VER_ARM64=""
 if download "$DEB_BASE/m/musl/" "$STAGE/musl-pool.html"; then
-    MUSL_VER_AMD64="$(grep -o 'musl-dev_[^"]*_amd64\.deb' "$STAGE/musl-pool.html" | sort -uV | tail -1 | cut -d_ -f2)"
-    MUSL_VER_ARM64="$(grep -o 'musl-dev_[^"]*_arm64\.deb'  "$STAGE/musl-pool.html" | sort -uV | tail -1 | cut -d_ -f2)"
+    MUSL_VER_AMD64="$(grep -o 'musl-dev_[^"]*_amd64\.deb' "$STAGE/musl-pool.html" | latest_ver)"
+    MUSL_VER_ARM64="$(grep -o 'musl-dev_[^"]*_arm64\.deb'  "$STAGE/musl-pool.html" | latest_ver)"
 else
     echo "[WARN] Debian 池目录（musl）不可达"
 fi
 if download "$DEB_BASE/l/linux/" "$STAGE/lld-pool.html"; then
-    LLD_VER_AMD64="$(grep -o 'linux-libc-dev_[^"]*_amd64\.deb' "$STAGE/lld-pool.html" | sort -uV | tail -1 | cut -d_ -f2)"
-    LLD_VER_ARM64="$(grep -o 'linux-libc-dev_[^"]*_arm64\.deb'  "$STAGE/lld-pool.html" | sort -uV | tail -1 | cut -d_ -f2)"
+    LLD_VER_AMD64="$(grep -o 'linux-libc-dev_[^"]*_amd64\.deb' "$STAGE/lld-pool.html" | latest_ver)"
+    LLD_VER_ARM64="$(grep -o 'linux-libc-dev_[^"]*_arm64\.deb'  "$STAGE/lld-pool.html" | latest_ver)"
 else
     echo "[WARN] Debian 池目录（linux）不可达，UAPI 头将缺失"
 fi

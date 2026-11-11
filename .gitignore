@@ -1,0 +1,25 @@
+# TCC 源码树（各平台脚本 clone 的临时目录）
+# 注意: tcc/ 既是 build.sh 的输出包目录，也是 build.cmd 的源码 clone 目录
+tcc-src/
+tinycc-src/
+tcc/
+
+# 构建 / 打包产物
+pkg/
+release/
+
+# 验证用的临时源文件与产物
+_test_*.c
+_t.c
+_t32.exe
+_tx64
+_ta64
+*.exe
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+
+# WorkBuddy 本地工作数据（非项目产物）
+.workbuddy/

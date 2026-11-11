@@ -109,11 +109,29 @@ jobs:
           path: release
 
   # ============================================================
-  # macOS aarch64 — clang 编译 TCC (mob 分支)
+  # macOS — clang 编译 TCC (mob 分支)
+  # 两个架构 leg 共用同一套构建脚本（脚本内无架构硬编码，SDK、
+  # 交叉编译器与产物架构自动跟随 runner 架构）：
+  #   aarch64: macos-latest    (arm64, 当前指向 macOS 26)
+  #   x86_64 : macos-26-intel  (Intel, 同为 macOS 26，避免两个包
+  #            的 SDK/最低系统版本不一致；若 label 不可用可换
+  #            macos-15-intel)
   # 产出: native + PE×2（win32）+ musl ELF×2 交叉编译器
+  # 注意: macos-*-intel 是 GitHub 最后一个 x86_64 镜像，官方计划
+  #       2027 年秋下线；届时 Intel leg 需停用或改自托管 runner。
   # ============================================================
-  macos-aarch64:
-    runs-on: macos-latest
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: aarch64
+            mach: arm64
+          - runner: macos-26-intel
+            arch: x86_64
+            mach: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -260,6 +278,15 @@ jobs:
           exec "$DIR/bin/tcc" -B"$DIR" "$@"
           W
           chmod +x tcc/tcc
+          # ── 架构断言：包内所有真实二进制必须是本 leg 的宿主架构 ──
+          # 防止"包名叫 x86_64、产物其实还是 arm64"；包根的 tcc/*-tcc
+          # 是 shell 启动器（无架构），bin/ 内才是真实二进制
+          for f in "$GITHUB_WORKSPACE"/tcc/bin/*; do
+            GOT_ARCH="$(lipo -archs "$f")"
+            [ "$GOT_ARCH" = "${{ matrix.mach }}" ] \
+              || { echo "[ERROR] $f 架构不符: $GOT_ARCH != ${{ matrix.mach }}"; exit 1; }
+          done
+          echo "  arch check OK: $(ls "$GITHUB_WORKSPACE"/tcc/bin | wc -l | tr -d ' ') binaries = ${{ matrix.mach }}"
           # 位置无关验证：从包目录之外调用
           echo 'int main(){return 0;}' > _test_tcc.c
           (cd /tmp && "$GITHUB_WORKSPACE/tcc/tcc" -o /tmp/_test_tcc "$GITHUB_WORKSPACE/_test_tcc.c") \
@@ -273,5 +300,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tcc-macos-aarch64
+          name: tcc-macos-${{ matrix.arch }}
           path: release
