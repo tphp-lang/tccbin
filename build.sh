@@ -109,10 +109,12 @@ if [ "$OS" != "Darwin" ]; then
         *) echo "[ERROR] 不支持的架构: $MACHINE"; exit 1 ;;
     esac
 
-    LIBC_VER="2.41-12+deb13u3"
     LIBC_BASE="http://ftp.de.debian.org/debian/pool/main/g/glibc"
-    LIBC_DEV_URL="${LIBC_BASE}/libc6-dev_${LIBC_VER}_${DEB_ARCH}.deb"
-    LIBC_URL="${LIBC_BASE}/libc6_${LIBC_VER}_${DEB_ARCH}.deb"
+    # 不再硬编码完整版本号：Debian 池清理旧版后会 404（2.41-12+deb13u3
+    # 已失效，导致 Linux job 挂在下载 libc6-dev）。改为从池页面解析。
+    # 限定 deb13u（Debian 13 trixie）系列，避免误取 sid/unstable 的
+    # 2.43/2.44 抬高包内 glibc 基线，令产物依赖更高的 GLIBC_x.y。
+    LIBC_SERIES="deb13u"
 
     TCC_LIB=../tcc/lib/tcc
     TCC_INC="$TCC_LIB/include"
@@ -128,6 +130,31 @@ if [ "$OS" != "Darwin" ]; then
             wget -q --tries=3 --waitretry=5 -O "$out" "$url"
         fi
     }
+
+    # ── 解析 glibc 版本（libc6-dev 与 libc6 必须严格同版本） ──
+    # 池页面同时列出两个包；分别取「目标架构 + deb13u 系列」的版本集合，
+    # 再取交集里的最大值。取不到就显式报错，绝不静默跳到其它发行版系列
+    # （那会改变工具链基线）。此段仅 Linux 执行，可用 GNU sort -V。
+    echo "[*] 解析 glibc 版本 ($DEB_ARCH, 系列 $LIBC_SERIES) ..."
+    if ! download_deb "${LIBC_BASE}/" "$TMPDIR/glibc-pool.html"; then
+        echo "[ERROR] 无法获取 glibc 池列表: ${LIBC_BASE}/"
+        exit 1
+    fi
+    DEV_VERS="$(grep -o "libc6-dev_[^\"]*_${DEB_ARCH}\.deb" "$TMPDIR/glibc-pool.html" \
+                  | cut -d_ -f2 | grep -F "+${LIBC_SERIES}" | sort -uV || true)"
+    RT_VERS="$(grep -o "libc6_[^\"]*_${DEB_ARCH}\.deb" "$TMPDIR/glibc-pool.html" \
+                  | cut -d_ -f2 | grep -F "+${LIBC_SERIES}" | sort -uV || true)"
+    COMMON_VER="$(printf '%s\n%s\n' "$DEV_VERS" "$RT_VERS" \
+                  | grep -v '^$' | sort | uniq -d | sort -V | tail -1 || true)"
+    if [ -z "$COMMON_VER" ]; then
+        echo "[ERROR] ${LIBC_BASE}/ 中未找到 ${DEB_ARCH} 架构下版本一致的 libc6-dev/libc6（系列 ${LIBC_SERIES}）"
+        echo "        请确认 Debian 发行版系列是否已切换，并更新 build.sh 的 LIBC_SERIES"
+        exit 1
+    fi
+    LIBC_VER="$COMMON_VER"
+    echo "    glibc 版本: $LIBC_VER"
+    LIBC_DEV_URL="${LIBC_BASE}/libc6-dev_${LIBC_VER}_${DEB_ARCH}.deb"
+    LIBC_URL="${LIBC_BASE}/libc6_${LIBC_VER}_${DEB_ARCH}.deb"
 
     # ── 解压 .deb 辅助函数（兼容 dpkg-deb 和 ar+tar） ──
     extract_deb() {
